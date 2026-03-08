@@ -1,0 +1,20 @@
+{
+  "domain": "calendar_exporter",
+  "name": "Calendar Exposer",
+  "codeowners": [
+    "@rhmhendriks"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "calendar",
+    "http"
+  ],
+  "documentation": "https://github.com/rhmhendriks/ha-calender-exposer",
+  "issue_tracker": "https://github.com/rhmhendriks/ha-calender-exposer/issues",
+  "iot_class": "local_push",
+  "requirements": [
+    "icalendar==5.0.11",
+    "python-dateutil>=2.8.2"
+  ],
+  "version": "1.0.0"
+}
