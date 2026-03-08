@@ -1,0 +1,14 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Setup Calendar Exposer",
+        "description": "Choose a name for your feed and select the calendars to merge.",
+        "data": {
+          "feed_name": "Feed Name",
+          "calendars": "Select Calendars to Export"
+        }
+      }
+    }
+  }
+}

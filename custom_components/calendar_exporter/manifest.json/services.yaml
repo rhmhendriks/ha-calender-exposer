@@ -1,0 +1,3 @@
+get_feed_url:
+  name: Get Feed URL
+  description: Returns the full HTTP URL for your exported iCal stream.
