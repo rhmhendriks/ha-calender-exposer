@@ -1,5 +1,7 @@
 import logging
-from datetime import timedelta
+from datetime import date, datetime, timedelta, timezone
+from email.utils import format_datetime
+import hashlib
 import icalendar
 from dateutil import parser
 
@@ -14,6 +16,59 @@ from .const import DOMAIN, CONF_CALENDARS
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor"]
+
+
+def _parse_event_datetime(value):
+    """Parse Home Assistant calendar values to date/datetime for ICS fields."""
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+        return value
+
+    if isinstance(value, date):
+        return value
+
+    if isinstance(value, str):
+        # Date-only values represent all-day events.
+        if "T" not in value:
+            return date.fromisoformat(value)
+        parsed = parser.isoparse(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+        return parsed
+
+    if isinstance(value, dict):
+        if "date" in value:
+            return date.fromisoformat(value["date"])
+        if "dateTime" in value:
+            parsed = parser.isoparse(value["dateTime"])
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+            return parsed
+
+    raise ValueError(f"Unsupported event datetime value: {value!r}")
+
+
+def _build_event_uid(entity_id: str, event: dict) -> str:
+    """Build a stable UID for calendar clients to track updates reliably."""
+    if event.get("uid"):
+        return str(event["uid"])
+
+    identity = "|".join(
+        [
+            entity_id,
+            str(event.get("summary", "")),
+            str(event.get("start", "")),
+            str(event.get("end", "")),
+            str(event.get("description", "")),
+            str(event.get("location", "")),
+        ]
+    )
+    digest = hashlib.sha1(identity.encode("utf-8"), usedforsecurity=False).hexdigest()
+    return f"{digest}@{DOMAIN}"
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Calendar Exporter from a config entry."""
@@ -78,7 +133,12 @@ class CalendarExportView(HomeAssistantView):
         cal = icalendar.Calendar()
         cal.add('prodid', f'-//Home Assistant Calendar Exporter//')
         cal.add('version', '2.0')
+        cal.add('method', 'PUBLISH')
         cal.add('x-wr-calname', self.entry.title)
+        cal.add('x-published-ttl', 'PT15M')
+        cal.add('x-wr-timezone', str(dt_util.DEFAULT_TIME_ZONE))
+
+        generated_at = datetime.now(timezone.utc)
 
         for entity_id in calendars:
             try:
@@ -95,28 +155,68 @@ class CalendarExportView(HomeAssistantView):
                     return_response=True,
                 )
 
-                events = response.get(entity_id, {}).get("events", [])
+                entity_response = response.get(entity_id, {}) if isinstance(response, dict) else {}
+                if isinstance(entity_response, dict) and "events" in entity_response:
+                    events = entity_response.get("events", [])
+                elif isinstance(entity_response, list):
+                    events = entity_response
+                elif isinstance(response, dict) and "events" in response:
+                    events = response.get("events", [])
+                else:
+                    events = []
                 
                 for evt in events:
-                    ical_evt = icalendar.Event()
-                    ical_evt.add('summary', evt.get('summary', 'Unknown'))
-                    
-                    if 'start' in evt:
-                        ical_evt.add('dtstart', parser.parse(evt['start']))
-                    if 'end' in evt:
-                        ical_evt.add('dtend', parser.parse(evt['end']))
-                    if 'description' in evt:
-                        ical_evt.add('description', evt['description'])
-                    if 'location' in evt:
-                        ical_evt.add('location', evt['location'])
-                    
-                    cal.add_component(ical_evt)
+                    try:
+                        ical_evt = icalendar.Event()
+                        ical_evt.add('summary', evt.get('summary', 'Unknown'))
+
+                        start_value = _parse_event_datetime(evt.get('start'))
+                        end_value = _parse_event_datetime(evt.get('end'))
+                        if start_value is None:
+                            _LOGGER.debug("Skipping event without start for %s: %s", entity_id, evt)
+                            continue
+
+                        ical_evt.add('uid', _build_event_uid(entity_id, evt))
+                        ical_evt.add('dtstamp', generated_at)
+                        ical_evt.add('last-modified', generated_at)
+                        ical_evt.add('dtstart', start_value)
+
+                        if end_value is not None:
+                            ical_evt.add('dtend', end_value)
+                        if 'description' in evt and evt['description']:
+                            ical_evt.add('description', evt['description'])
+                        if 'location' in evt and evt['location']:
+                            ical_evt.add('location', evt['location'])
+
+                        cal.add_component(ical_evt)
+                    except Exception as err:
+                        # Keep exporting remaining events when one event has invalid data.
+                        _LOGGER.warning("Skipping invalid event for %s: %s", entity_id, err)
 
             except Exception as e:
                 _LOGGER.error("Error fetching events for %s: %s", entity_id, e)
 
+        body = cal.to_ical()
+        etag = hashlib.sha256(body).hexdigest()
+        quoted_etag = f'"{etag}"'
+
+        if request.headers.get("If-None-Match") == quoted_etag:
+            return web.Response(
+                status=304,
+                headers={
+                    "ETag": quoted_etag,
+                    "Cache-Control": "public, max-age=300, must-revalidate",
+                    "Last-Modified": format_datetime(generated_at, usegmt=True),
+                },
+            )
+
         return web.Response(
-            body=cal.to_ical(), 
+            body=body,
             content_type="text/calendar",
-            charset="utf-8"
+            charset="utf-8",
+            headers={
+                "ETag": quoted_etag,
+                "Cache-Control": "public, max-age=300, must-revalidate",
+                "Last-Modified": format_datetime(generated_at, usegmt=True),
+            },
         )
