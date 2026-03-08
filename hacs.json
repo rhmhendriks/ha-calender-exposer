@@ -1,7 +1,6 @@
 {
     "name": "Calendar Exposer",
     "render_readme": true,
-    "file_name": "calendar_exporter",
     "iot_class": "Local Push",
     "version": "1.0.0"
 }
