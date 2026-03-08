@@ -70,6 +70,19 @@ def _build_event_uid(entity_id: str, event: dict) -> str:
     digest = hashlib.sha1(identity.encode("utf-8"), usedforsecurity=False).hexdigest()
     return f"{digest}@{DOMAIN}"
 
+
+def _as_utc_datetime(value) -> datetime:
+    """Convert date/datetime values to timezone-aware UTC datetimes."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+        return value.astimezone(timezone.utc)
+
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+
+    raise ValueError(f"Cannot convert to UTC datetime: {value!r}")
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Calendar Exporter from a config entry."""
     hass.data.setdefault(DOMAIN, {})
@@ -138,7 +151,7 @@ class CalendarExportView(HomeAssistantView):
         cal.add('x-published-ttl', 'PT15M')
         cal.add('x-wr-timezone', str(dt_util.DEFAULT_TIME_ZONE))
 
-        generated_at = datetime.now(timezone.utc)
+        feed_last_modified = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
         for entity_id in calendars:
             try:
@@ -176,9 +189,18 @@ class CalendarExportView(HomeAssistantView):
                             _LOGGER.debug("Skipping event without start for %s: %s", entity_id, evt)
                             continue
 
+                        modified_source = (
+                            evt.get('updated')
+                            or evt.get('last_modified')
+                            or evt.get('created')
+                            or start_value
+                        )
+                        modified_value = _parse_event_datetime(modified_source)
+                        modified_at = _as_utc_datetime(modified_value)
+
                         ical_evt.add('uid', _build_event_uid(entity_id, evt))
-                        ical_evt.add('dtstamp', generated_at)
-                        ical_evt.add('last-modified', generated_at)
+                        ical_evt.add('dtstamp', modified_at)
+                        ical_evt.add('last-modified', modified_at)
                         ical_evt.add('dtstart', start_value)
 
                         if end_value is not None:
@@ -189,12 +211,17 @@ class CalendarExportView(HomeAssistantView):
                             ical_evt.add('location', evt['location'])
 
                         cal.add_component(ical_evt)
+                        if modified_at > feed_last_modified:
+                            feed_last_modified = modified_at
                     except Exception as err:
                         # Keep exporting remaining events when one event has invalid data.
                         _LOGGER.warning("Skipping invalid event for %s: %s", entity_id, err)
 
             except Exception as e:
                 _LOGGER.error("Error fetching events for %s: %s", entity_id, e)
+
+        if feed_last_modified.year == 1970:
+            feed_last_modified = datetime.now(timezone.utc)
 
         body = cal.to_ical()
         etag = hashlib.sha256(body).hexdigest()
@@ -206,7 +233,7 @@ class CalendarExportView(HomeAssistantView):
                 headers={
                     "ETag": quoted_etag,
                     "Cache-Control": "public, max-age=300, must-revalidate",
-                    "Last-Modified": format_datetime(generated_at, usegmt=True),
+                    "Last-Modified": format_datetime(feed_last_modified, usegmt=True),
                 },
             )
 
@@ -217,6 +244,6 @@ class CalendarExportView(HomeAssistantView):
             headers={
                 "ETag": quoted_etag,
                 "Cache-Control": "public, max-age=300, must-revalidate",
-                "Last-Modified": format_datetime(generated_at, usegmt=True),
+                "Last-Modified": format_datetime(feed_last_modified, usegmt=True),
             },
         )

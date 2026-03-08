@@ -16,5 +16,5 @@
     "icalendar==5.0.11",
     "python-dateutil>=2.8.2"
   ],
-  "version": "1.0.0"
+  "version": "1.0.1"
 }
