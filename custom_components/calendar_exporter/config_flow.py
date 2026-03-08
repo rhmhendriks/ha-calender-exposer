@@ -1,7 +1,6 @@
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.helpers import selector
-import homeassistant.helpers.config_validation as cv
 
 from .const import DOMAIN, CONF_CALENDARS, CONF_FEED_NAME
 
